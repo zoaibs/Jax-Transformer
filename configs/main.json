@@ -1,0 +1,8 @@
+{
+  "backend": "gpu", "models": [{"hidden": 256, "heads": 4}],
+  "shapes": [{"batch": 1, "sequence": 64}, {"batch": 1, "sequence": 256},
+             {"batch": 1, "sequence": 512}, {"batch": 2, "sequence": 256}],
+  "dtypes": ["fp32", "bf16"], "variants": ["reference", "components", "whole", "packed"],
+  "warmup": 5, "repeats": 40, "group_size": 3, "timeout_seconds": 600,
+  "save_hlo": true
+}

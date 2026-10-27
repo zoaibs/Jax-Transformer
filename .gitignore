@@ -1,0 +1,29 @@
+.venv*/
+.tools/
+.cache/
+.wsl/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Generated artifacts and local write-ups
+/docs/
+/results/
+/reports/
+*.log
+
+# Session-specific bookkeeping
+/scripts/finalize.py
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+

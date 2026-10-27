@@ -1,0 +1,6 @@
+{
+  "backend": "cpu", "models": [{"hidden": 64, "heads": 4}],
+  "shapes": [{"batch": 1, "sequence": 32}], "dtypes": ["fp32", "bf16"],
+  "variants": ["reference", "components", "whole", "packed"],
+  "warmup": 2, "repeats": 8, "group_size": 2, "timeout_seconds": 180
+}

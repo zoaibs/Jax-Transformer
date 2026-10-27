@@ -1,0 +1,13 @@
+{
+  "backend": "gpu", "workloads": [
+    {"name": "exact", "model": {"hidden": 256, "heads": 4, "dtype": "fp32"},
+     "variant": "packed", "distribution": {"count": 25, "minimum": 65, "maximum": 512, "seed": 42},
+     "batch_size": 2, "buckets": null, "repeats": 5},
+    {"name": "bucketed", "model": {"hidden": 256, "heads": 4, "dtype": "fp32"},
+     "variant": "packed", "distribution": {"count": 25, "minimum": 65, "maximum": 512, "seed": 42},
+     "batch_size": 2, "buckets": [128, 256, 512], "repeats": 5},
+    {"name": "fine_buckets", "model": {"hidden": 256, "heads": 4, "dtype": "fp32"},
+     "variant": "packed", "distribution": {"count": 25, "minimum": 65, "maximum": 512, "seed": 42},
+     "batch_size": 2, "buckets": [128, 192, 256, 384, 512], "repeats": 5}
+  ], "timeout_seconds": 600
+}

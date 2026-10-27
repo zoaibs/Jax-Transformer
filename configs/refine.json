@@ -1,0 +1,7 @@
+{
+  "backend": "gpu", "workloads": [
+    {"name": "refined_64", "model": {"hidden": 256, "heads": 4, "dtype": "fp32"},
+     "variant": "packed", "distribution": {"count": 25, "minimum": 65, "maximum": 512, "seed": 42},
+     "batch_size": 2, "buckets": [128, 192, 256, 320, 384, 448, 512], "repeats": 5}
+  ], "timeout_seconds": 600
+}
