@@ -142,3 +142,51 @@ def test_workload_end_to_end(tmp_path):
     assert record["processed_tokens"] == 5 * 8
     assert all(v["passed"] for v in record["validations"])
     assert len(record["warm_compute_samples_ms"]) == 2
+
+
+def test_source_snapshot_rejects_files_changing_during_capture(tmp_path, monkeypatch):
+    from jax_transformer_lab import benchmark
+
+    config = tmp_path / "config.json"
+    write_json(
+        config, {"backend": "cpu", "models": [{"hidden": 16}], "shapes": [{"batch": 1, "sequence": 8}]}
+    )
+    fingerprints = iter(["a" * 64, "b" * 64])
+    monkeypatch.setattr(benchmark, "source_fingerprint", lambda: next(fingerprints))
+    with pytest.raises(RuntimeError, match="Source changed while capturing"):
+        benchmark.run_suite(config, tmp_path / "unstable")
+
+
+def test_cli_backend_overrides_each_job_kind(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from jax_transformer_lab import benchmark
+
+    item = {
+        "backend": "cpu",
+        "model": {"hidden": 16, "heads": 4, "dtype": "fp32"},
+        "batch": 1,
+        "sequence": 8,
+        "variant": "whole",
+    }
+    config = tmp_path / "config.json"
+    write_json(
+        config,
+        {
+            "backend": "cpu",
+            "cases": [item],
+            "memory": [item],
+            "workloads": [{"name": "override", "backend": "cpu"}],
+        },
+    )
+    selected = []
+
+    def mock_worker(command, **kwargs):
+        spec = json.loads(open(command[command.index("--spec") + 1], encoding="utf-8").read())
+        selected.append(spec["backend"])
+        write_json(command[command.index("--output") + 1], {"status": "ok"})
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(benchmark.subprocess, "run", mock_worker)
+    benchmark.run_suite(config, tmp_path / "run", backend="gpu")
+    assert selected == ["gpu", "gpu", "gpu"]

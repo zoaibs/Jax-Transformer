@@ -13,6 +13,8 @@ VARIANTS = ("reference", "components", "whole", "packed", "cudnn")
 def make_variant(name, config):
     if name not in VARIANTS:
         raise ValueError(f"Unknown variant: {name}")
+    if name == "cudnn" and config.dtype != "bf16":
+        raise ValueError("The cuDNN attention variant requires bf16; use whole or packed for fp32")
     if name == "reference":
         return partial(forward, config=config)
     if name in ("whole", "packed", "cudnn"):

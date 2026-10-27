@@ -9,7 +9,38 @@ from .benchmark import configure_backend, executable_memory, synchronize
 from .util import environment, write_json
 
 
-def capture(output, backend="gpu", variant="packed", sequence=256, hidden=256, dtype="fp32"):
+def summarize_events(events):
+    """GPU evidence requires duration events on a metadata-identified GPU process."""
+    process_names = {
+        e.get("pid"): e.get("args", {}).get("name", "")
+        for e in events
+        if e.get("ph") == "M" and e.get("name") == "process_name"
+    }
+    gpu_pids = {pid for pid, name in process_names.items() if "GPU" in name.upper()}
+    durations = [e for e in events if e.get("ph") == "X"]
+    gpu = [e for e in durations if e.get("pid") in gpu_pids]
+
+    def top(items):
+        totals = {}
+        for event in items:
+            value = totals.setdefault(event.get("name", "unknown"), {"count": 0, "summed_duration_us": 0.0})
+            value["count"] += 1
+            value["summed_duration_us"] += event.get("dur", 0)
+        return sorted(totals.items(), key=lambda t: t[1]["summed_duration_us"], reverse=True)[:20]
+
+    return {
+        "process_names": list(process_names.values()),
+        "duration_events": len(durations),
+        "gpu_duration_events": len(gpu),
+        "top_gpu_events": top(gpu),
+        "top_events_by_summed_duration": top(durations),
+        "note": "Nested and concurrent event durations overlap; sums are not elapsed time or utilization.",
+    }
+
+
+def capture(
+    output, backend="gpu", variant="packed", sequence=256, hidden=256, dtype="fp32", heads=4, batch=1
+):
     configure_backend(backend)
     import jax
     import jax.numpy as jnp
@@ -20,9 +51,9 @@ def capture(output, backend="gpu", variant="packed", sequence=256, hidden=256, d
 
     path = Path(output)
     path.mkdir(parents=True, exist_ok=True)
-    cfg = ModelConfig(hidden=hidden, heads=4, dtype=dtype)
+    cfg = ModelConfig(hidden=hidden, heads=heads, dtype=dtype)
     params = device_params(host_params(cfg), cfg)
-    hx, hm = static_inputs(1, sequence, hidden)
+    hx, hm = static_inputs(batch, sequence, hidden)
     x, mask = synchronize((jnp.asarray(hx, cfg.compute_dtype), jnp.asarray(hm)))
     fn = make_variant(variant, cfg)
     for _ in range(5):
@@ -31,7 +62,7 @@ def capture(output, backend="gpu", variant="packed", sequence=256, hidden=256, d
         "environment": environment(),
         "variant": variant,
         "model": cfg.to_dict(),
-        "batch": 1,
+        "batch": batch,
         "sequence": sequence,
     }
     if hasattr(fn, "lower"):
@@ -64,31 +95,17 @@ def capture(output, backend="gpu", variant="packed", sequence=256, hidden=256, d
             with gzip.open(trace, "rt", encoding="utf-8") as handle:
                 data = json.load(handle)
             events = data.get("traceEvents", [])
-            processes = [
-                e.get("args", {}).get("name", "")
-                for e in events
-                if e.get("ph") == "M" and e.get("name") == "process_name"
-            ]
-            durations = [e for e in events if e.get("ph") == "X"]
-            totals = {}
-            for e in durations:
-                name = e.get("name", "unknown")
-                item = totals.setdefault(name, {"count": 0, "summed_duration_us": 0.0})
-                item["count"] += 1
-                item["summed_duration_us"] += e.get("dur", 0)
             summaries.append(
                 {
                     "file": str(trace.relative_to(path)),
-                    "process_names": processes,
-                    "duration_events": len(durations),
-                    "top_events_by_summed_duration": sorted(
-                        totals.items(), key=lambda t: t[1]["summed_duration_us"], reverse=True
-                    )[:20],
-                    "note": "Nested/overlapping durations cannot be added into elapsed time.",
+                    **summarize_events(events),
                 }
             )
         except (OSError, ValueError) as exc:
             summaries.append({"file": str(trace), "error": str(exc)})
     summary["traces"] = summaries
+    summary["gpu_activity_verified"] = any(s.get("gpu_duration_events", 0) > 0 for s in summaries)
+    if backend == "gpu" and summary["trace_status"] == "captured" and not summary["gpu_activity_verified"]:
+        summary["trace_status"] = "host_only"
     write_json(path / "summary.json", summary)
     return summary

@@ -1,0 +1,114 @@
+{
+  "backend": "gpu",
+  "warmup": 20,
+  "warmup_seconds": 1.0,
+  "repeats": 200,
+  "group_size": 1,
+  "queue_depth": 8,
+  "queue_repeats": 20,
+  "timeout_seconds": 300,
+  "cases": [
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "fp32"
+      },
+      "batch": 1,
+      "sequence": 256,
+      "variant": "whole"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "fp32"
+      },
+      "batch": 1,
+      "sequence": 256,
+      "variant": "packed"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "bf16"
+      },
+      "batch": 1,
+      "sequence": 256,
+      "variant": "packed"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "bf16"
+      },
+      "batch": 1,
+      "sequence": 256,
+      "variant": "cudnn"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "fp32"
+      },
+      "batch": 1,
+      "sequence": 1024,
+      "variant": "whole"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "fp32"
+      },
+      "batch": 1,
+      "sequence": 1024,
+      "variant": "packed"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "bf16"
+      },
+      "batch": 1,
+      "sequence": 1024,
+      "variant": "packed"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "bf16"
+      },
+      "batch": 1,
+      "sequence": 1024,
+      "variant": "cudnn"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "bf16"
+      },
+      "batch": 1,
+      "sequence": 1024,
+      "variant": "components"
+    },
+    {
+      "model": {
+        "hidden": 256,
+        "heads": 4,
+        "dtype": "bf16"
+      },
+      "batch": 1,
+      "sequence": 1024,
+      "variant": "whole"
+    }
+  ],
+  "trials": 3,
+  "alternate_order": true
+}

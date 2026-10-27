@@ -1,0 +1,62 @@
+{
+  "backend": "gpu",
+  "warmup": 20,
+  "warmup_seconds": 0.3,
+  "repeats": 30,
+  "group_size": 1,
+  "queue_depth": 8,
+  "queue_repeats": 5,
+  "timeout_seconds": 300,
+  "cases": [
+    {
+      "model": {
+        "hidden": 128,
+        "heads": 2,
+        "dtype": "fp32"
+      },
+      "batch": 1,
+      "sequence": 64,
+      "variant": "components"
+    },
+    {
+      "model": {
+        "hidden": 128,
+        "heads": 2,
+        "dtype": "fp32"
+      },
+      "batch": 1,
+      "sequence": 64,
+      "variant": "whole"
+    },
+    {
+      "model": {
+        "hidden": 128,
+        "heads": 2,
+        "dtype": "fp32"
+      },
+      "batch": 1,
+      "sequence": 64,
+      "variant": "packed"
+    },
+    {
+      "model": {
+        "hidden": 128,
+        "heads": 2,
+        "dtype": "bf16"
+      },
+      "batch": 1,
+      "sequence": 64,
+      "variant": "packed"
+    },
+    {
+      "model": {
+        "hidden": 128,
+        "heads": 2,
+        "dtype": "bf16"
+      },
+      "batch": 1,
+      "sequence": 64,
+      "variant": "cudnn"
+    }
+  ]
+}

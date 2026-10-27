@@ -128,8 +128,11 @@ def block(p, x, mask, config, fused=False, attention_backend=None):
         z = layer_norm(x, p["ln1_g"], p["ln1_b"], config)
         q, k, v = project(z, p, config, fused)
         if attention_backend:
+            # cuDNN's bias path requires both sequence axes explicitly present;
+            # a [B,1,1,S] broadcast mask accepted by XLA is rejected by JAX 0.8.2.
+            full_mask = jnp.broadcast_to(mask[:, None, None, :], (x.shape[0], 1, x.shape[1], x.shape[1]))
             z = jax.nn.dot_product_attention(
-                q, k, v, mask=mask[:, None, None, :], implementation=attention_backend
+                q, k, v, mask=full_mask, implementation=attention_backend
             ).reshape(x.shape)
         else:
             z = attention(q, k, v, mask)

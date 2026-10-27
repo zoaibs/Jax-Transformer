@@ -53,7 +53,8 @@ def test_padding_isolation_and_bucket_equivalence(dtype, variant):
     actual = np.asarray(fn(params, x, mask), np.float32)
     exact = np.asarray(fn(params, x[:, :5], mask[:, :5]), np.float32)
     # Altering padded token content cannot influence valid queries.
-    poisoned = jnp.where(mask[..., None], x, jnp.asarray(50, cfg.compute_dtype))
+    garbage = jnp.asarray(np.random.default_rng(99).standard_normal(hx.shape) * 25, cfg.compute_dtype)
+    poisoned = jnp.where(mask[..., None], x, garbage)
     modified = np.asarray(fn(params, poisoned, mask), np.float32)
     np.testing.assert_allclose(actual[hm], modified[hm], atol=1e-5)
     tolerance = 0.04 if dtype == "bf16" else 2e-5

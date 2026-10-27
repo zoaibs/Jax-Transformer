@@ -28,10 +28,17 @@ def main(argv=None):
     )
     profile.add_argument("--sequence", type=int, default=256)
     profile.add_argument("--hidden", type=int, default=256)
+    profile.add_argument("--heads", type=int, default=4)
+    profile.add_argument("--batch", type=int, default=1)
     profile.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
     report = sub.add_parser("report", help="Regenerate figures and technical report from saved results")
     report.add_argument("--results", default="results")
     report.add_argument("--output", default="reports")
+    gpu_report = sub.add_parser(
+        "gpu-report", help="Generate separate GPU findings without changing the CPU report"
+    )
+    gpu_report.add_argument("--results", default="results/gpu_local")
+    gpu_report.add_argument("--output", default="reports/gpu_findings.md")
     args = parser.parse_args(argv)
     if args.command == "doctor":
         from .benchmark import configure_backend
@@ -59,7 +66,12 @@ def main(argv=None):
         manifest = run_suite(args.config, args.output, args.backend, args.repeats)
         failed = sum(j["status"] != "ok" for j in manifest["jobs"])
         print(f"Completed {len(manifest['jobs'])} jobs; {failed} failed. Results: {args.output}")
-        return 1 if failed else 0
+        if manifest.get("source_changed_during_suite"):
+            print(
+                "Source changed during the suite; preserve these records and rerun from a stable checkout.",
+                file=sys.stderr,
+            )
+        return 1 if failed or manifest.get("source_changed_during_suite") else 0
     elif args.command == "_worker":
         from .benchmark import worker
 
@@ -69,7 +81,16 @@ def main(argv=None):
 
         print(
             json.dumps(
-                capture(args.output, args.backend, args.variant, args.sequence, args.hidden, args.dtype),
+                capture(
+                    args.output,
+                    args.backend,
+                    args.variant,
+                    args.sequence,
+                    args.hidden,
+                    args.dtype,
+                    args.heads,
+                    args.batch,
+                ),
                 indent=2,
             )
         )
@@ -77,6 +98,10 @@ def main(argv=None):
         from .reporting import generate
 
         print(generate(Path(args.results), Path(args.output)))
+    elif args.command == "gpu-report":
+        from .gpu_reporting import generate_gpu
+
+        print(generate_gpu(Path(args.results), Path(args.output)))
     return 0
 
 

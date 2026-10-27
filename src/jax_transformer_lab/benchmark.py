@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .util import ROOT, environment, error_metrics, now, source_fingerprint, stats, write_json
+from .util import ROOT, environment, error_metrics, now, run_text, source_fingerprint, stats, write_json
 
 
 def configure_backend(backend):
@@ -20,7 +20,7 @@ def configure_backend(backend):
     if backend == "gpu" and sys.platform == "win32":
         raise RuntimeError(
             "NVIDIA JAX requires Linux/WSL2; native Windows has no supported CUDA backend. "
-            "See docs/environment.md. GPU results were not produced."
+            "See README.md. GPU results were not produced."
         )
     os.environ["JAX_PLATFORMS"] = "cuda" if backend == "gpu" else "cpu"
     os.environ["JAX_ENABLE_COMPILATION_CACHE"] = "false"
@@ -79,6 +79,7 @@ def worker_case(spec, output):
     import jax.numpy as jnp
 
     from .model import ModelConfig, device_params, host_params
+    from .telemetry import nvidia_snapshot
     from .variants import make_variant
     from .workloads import static_inputs
 
@@ -95,6 +96,7 @@ def worker_case(spec, output):
 
     (params, x, mask), transfer_ms = timed(transfer)
     fn = make_variant(spec["variant"], config)
+    telemetry_before = nvidia_snapshot() if spec["backend"] == "gpu" else None
     memory_before = allocator_snapshot()
     stage = {"trace_ms": None, "lower_ms": None, "compile_ms": None}
     compiled = None
@@ -129,8 +131,18 @@ def worker_case(spec, output):
     if not validation["passed"]:
         raise ValueError(f"Numerical validation failed: {validation}")
     del fp_params, expected
-    for _ in range(spec.get("warmup", 5)):
+    warmup_count = 0
+    warmup_start = time.monotonic()
+    while warmup_count < spec.get("warmup", 5) or time.monotonic() - warmup_start < spec.get(
+        "warmup_seconds", 0
+    ):
         timed(run)
+        warmup_count += 1
+    telemetry_warm = nvidia_snapshot() if spec["backend"] == "gpu" else None
+    if spec["backend"] == "gpu":
+        # Reestablish execution after the external telemetry query's idle gap.
+        for _ in range(20):
+            timed(run)
     samples = []
     group_size = spec.get("group_size", 1)
     # Each call synchronizes: amortizes timer bookkeeping, not Python dispatch/sync overhead.
@@ -140,6 +152,33 @@ def worker_case(spec, output):
             result = synchronize(run())
         samples.append((time.perf_counter_ns() - start) / 1e6 / group_size)
     summary = stats(samples)
+    # Separate sustained enqueue experiment. These are group-average completion times,
+    # not individual-call latency or serving throughput. All outputs remain alive until sync.
+    queued = None
+    depth = spec.get("queue_depth", 0)
+    if depth:
+        queue_samples = []
+        for _ in range(spec.get("queue_repeats", 20)):
+            start = time.perf_counter_ns()
+            outputs = [run() for _ in range(depth)]
+            synchronize(outputs)
+            queue_samples.append((time.perf_counter_ns() - start) / 1e6 / depth)
+        queued = {
+            "depth": depth,
+            "samples_ms_per_batch": queue_samples,
+            "per_batch": stats(queue_samples),
+            "note": "Each sample enqueues independent repeated batches and synchronizes all outputs; includes host dispatch.",
+        }
+        # Check every output from the final queued group outside all timing regions.
+        queue_checks = [error_metrics(out, result, config.dtype) for out in outputs]
+        queued["validation"] = {
+            "reference": "previously validated synchronized output",
+            "passed": all(v["passed"] for v in queue_checks),
+            "outputs": queue_checks,
+        }
+        if not queued["validation"]["passed"]:
+            raise ValueError("Queued outputs differ from synchronized execution")
+    telemetry_after = nvidia_snapshot() if spec["backend"] == "gpu" else None
     tokens = spec["batch"] * spec["sequence"]
     metadata = environment()
     record = {
@@ -156,6 +195,12 @@ def worker_case(spec, output):
         "samples_ms": samples,
         "warm": summary,
         "group_size": group_size,
+        "sample_unit": "individual synchronized batch call"
+        if group_size == 1
+        else f"mean of {group_size} individually synchronized calls",
+        "warmup_calls": warmup_count,
+        "queued": queued,
+        "telemetry": {"before": telemetry_before, "after_warmup": telemetry_warm, "after": telemetry_after},
         "tokens_per_second": tokens / (summary["median_ms"] / 1000),
         "validation": validation,
         "executable_memory": executable_memory(compiled),
@@ -164,6 +209,60 @@ def worker_case(spec, output):
         "allocator_after_warm": allocator_snapshot(),
         "memory_notes": "Executable memory is a static compiler estimate, not process VRAM or runtime peak. "
         "Allocator snapshots are process-wide and include validation allocations after first.",
+    }
+    write_json(output, record)
+    return record
+
+
+def worker_memory(spec, output):
+    """Dedicated process: no accuracy-reference arrays and no queued outputs."""
+    configure_backend(spec["backend"])
+    import jax
+    import jax.numpy as jnp
+
+    from .model import ModelConfig, device_params, host_params
+    from .telemetry import memory_description, nvidia_snapshot
+    from .variants import make_variant
+    from .workloads import static_inputs
+
+    config = ModelConfig(**spec["model"])
+    fn = make_variant(spec["variant"], config)
+    if not hasattr(fn, "lower"):
+        raise ValueError("Memory workers require a whole-block compiled variant")
+    params = device_params(host_params(config, spec.get("seed", 0)), config)
+    hx, hm = static_inputs(spec["batch"], spec["sequence"], config.hidden, spec.get("input_seed", 7))
+    params, x, mask = synchronize((params, jnp.asarray(hx, config.compute_dtype), jax.device_put(hm)))
+    snapshots = {"after_upload": memory_description(allocator_snapshot())}
+    compiled = fn.lower(params, x, mask).compile()
+    snapshots["after_compile"] = memory_description(allocator_snapshot())
+    result = synchronize(compiled(params, x, mask))
+    snapshots["after_first_execution"] = memory_description(allocator_snapshot())
+    for _ in range(spec.get("warmup", 20)):
+        result = synchronize(compiled(params, x, mask))
+    snapshots["after_warm"] = memory_description(allocator_snapshot())
+    # Host read occurs after the final measured allocation snapshot. Numerical accuracy
+    # is checked by matched case workers and GPU correctness tests, not a reference here.
+    finite = bool(np.isfinite(np.asarray(result, dtype=np.float32)).all())
+    record = {
+        "status": "ok" if finite else "error",
+        "kind": "memory",
+        "spec": spec,
+        "environment": environment(),
+        "snapshots": snapshots,
+        "executable_memory": executable_memory(compiled),
+        "finite": finite,
+        "telemetry": nvidia_snapshot(),
+        "reported_compute_processes": run_text(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ]
+        ),
+        "notes": "No reference model or FP32 validation tensors are allocated in this worker. "
+        "Allocator high-water counters include compilation/autotuning; counters were not reset. "
+        "Device-wide NVIDIA memory includes other applications and driver allocations. "
+        "WSL/WDDM process telemetry may be unavailable or use Windows rather than Linux PIDs.",
     }
     write_json(output, record)
     return record
@@ -303,9 +402,11 @@ def run_suite(config_path, output_dir, backend=None, repeats=None):
             for path in sorted((ROOT / folder).rglob("*")):
                 if path.is_file() and "__pycache__" not in path.parts:
                     archive.write(path, path.relative_to(ROOT))
-        for name in ("pyproject.toml", "requirements-windows.lock.txt"):
+        for name in ("pyproject.toml", "requirements-windows.lock.txt", "requirements-linux.lock.txt"):
             if (ROOT / name).exists():
                 archive.write(ROOT / name, name)
+    if source_fingerprint() != fingerprint:
+        raise RuntimeError("Source changed while capturing the snapshot; rerun from a stable checkout")
     jobs = []
     for model in config.get("models", []):
         for shape in config.get("shapes", []):
@@ -325,18 +426,50 @@ def run_suite(config_path, output_dir, backend=None, repeats=None):
                             "save_hlo": config.get("save_hlo", False),
                         }
                     )
+    defaults = {
+        "kind": "case",
+        "backend": backend or config["backend"],
+        "repeats": repeats or config.get("repeats", 100),
+        "warmup": config.get("warmup", 20),
+        "warmup_seconds": config.get("warmup_seconds", 0),
+        "group_size": config.get("group_size", 1),
+        "queue_depth": config.get("queue_depth", 0),
+        "queue_repeats": config.get("queue_repeats", 20),
+        "seed": config.get("seed", 0),
+        "save_hlo": config.get("save_hlo", False),
+    }
+    for case in config.get("cases", []):
+        jobs.append(defaults | case | {"backend": backend or case.get("backend", config["backend"])})
+    for memory in config.get("memory", []):
+        jobs.append(defaults | memory | {"kind": "memory"})
     for workload in config.get("workloads", []):
         jobs.append({"kind": "workload", "backend": backend or config["backend"], **workload})
-    manifest = {"started": now(), "config": config, "source_sha256": source_fingerprint(), "jobs": []}
+    trials = config.get("trials", 1)
+    if trials < 1 or not jobs:
+        raise ValueError("A suite needs at least one job and one trial")
+    for job in jobs:
+        if backend is not None:
+            job["backend"] = backend
+        if job.get("repeats", 1) < 1 or job.get("group_size", 1) < 1 or job.get("queue_depth", 0) < 0:
+            raise ValueError("repeats/group_size must be positive and queue_depth nonnegative")
+    jobs = [
+        job | {"trial": trial + 1}
+        for trial in range(trials)
+        for job in (list(reversed(jobs)) if config.get("alternate_order") and trial % 2 else jobs)
+    ]
+    manifest = {"started": now(), "config": config, "source_sha256": fingerprint, "jobs": []}
     write_json(output_dir / "manifest.json", manifest)
     for i, job in enumerate(jobs):
         tag = f"{i:03d}_{job['kind']}"
-        if job["kind"] == "case":
+        if job["kind"] in ("case", "memory"):
             tag += f"_{job['variant']}_{job['model']['dtype']}_b{job['batch']}_s{job['sequence']}"
         else:
             tag += f"_{job.get('name', 'trace')}"
         spec_path, result_path = output_dir / f"{tag}.spec.json", output_dir / f"{tag}.json"
         write_json(spec_path, job)
+        # A failed rerun must never be mistaken for an old successful result.
+        if result_path.exists():
+            result_path.unlink()
         command = [
             sys.executable,
             "-m",
@@ -390,6 +523,8 @@ def run_suite(config_path, output_dir, backend=None, repeats=None):
         )
         write_json(output_dir / "manifest.json", manifest)
     manifest["finished"] = now()
+    manifest["final_source_sha256"] = source_fingerprint()
+    manifest["source_changed_during_suite"] = manifest["final_source_sha256"] != fingerprint
     write_json(output_dir / "manifest.json", manifest)
     return manifest
 
@@ -397,7 +532,8 @@ def run_suite(config_path, output_dir, backend=None, repeats=None):
 def worker(spec_path, output):
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     try:
-        return worker_case(spec, output) if spec["kind"] == "case" else worker_workload(spec, output)
+        handlers = {"case": worker_case, "workload": worker_workload, "memory": worker_memory}
+        return handlers[spec["kind"]](spec, output)
     except Exception as exc:
         write_json(
             output,
